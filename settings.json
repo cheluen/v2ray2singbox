@@ -1,0 +1,6 @@
+{
+    "username": "root",
+    "password": "root",
+    "start_port": 30001,
+    "listen": "::"
+}
