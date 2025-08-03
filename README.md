@@ -20,34 +20,33 @@ V2ray2Singbox 是一个用于将各种代理节点链接（如 vmess、ss、troj
 
 ## 安装方法
 
-### 依赖环境
+### 环境要求
 
-- Python 3.6+
+- Python 3.7+
+- 无需额外依赖（核心功能基于Python标准库）
 
 ### 安装步骤
 
-1. 克隆或下载本仓库
+1. 下载项目
 
 ```bash
 git clone https://github.com/cheluen/v2ray2singbox.git
 cd v2ray2singbox
 ```
 
-2. 创建并激活虚拟环境（推荐）
+2. 直接使用
 
 ```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# macOS/Linux
-python3 -m venv venv
-source venv/bin/activate
+python v2ray2singbox.py --help
 ```
 
-3. 安装依赖
+### 可选依赖
+
+如果需要导出Clash配置（`--export-clash`功能），需要安装PyYAML：
 
 ```bash
+pip install PyYAML
+# 或者
 pip install -r requirements.txt
 ```
 
@@ -57,12 +56,18 @@ pip install -r requirements.txt
 
 1. 准备节点文件
 
-   创建一个名为 `node.txt` 的文件，将你的节点链接（vmess://、ss://、trojan://、vless://、hysteria2://）按行放入其中。
+   编辑 `node.txt` 文件，将你的节点链接放入其中，每行一个：
+
+```
+vmess://eyJ2IjoiMiIsInBzIjoidGVzdCIsImFkZCI6IjEyNy4wLjAuMSIsInBvcnQiOiI4MDgwIiwiaWQiOiIxMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWIiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ0ZXN0LmNvbSIsInBhdGgiOiIvdGVzdCIsInRscyI6InRscyJ9
+vless://12345678-1234-1234-1234-123456789012@example.com:443?type=ws&path=/test&security=tls&sni=example.com#test-vless
+ss://YWVzLTI1Ni1nY206dGVzdHBhc3N3b3Jk@example.com:8388#test-ss
+trojan://password@example.com:443?type=ws&path=/trojan&sni=example.com#test-trojan
+```
 
 2. 运行转换工具
 
 ```bash
-# 确保已激活虚拟环境
 python v2ray2singbox.py
 ```
 
@@ -74,16 +79,27 @@ python v2ray2singbox.py
 sing-box run -c config.json
 ```
 
-### 命令行参数
+### 命令行选项
 
-```
-python v2ray2singbox.py [-i INPUT] [-o OUTPUT] [-c CONFIG]
+```bash
+# 基本转换
+python v2ray2singbox.py -i nodes.txt -o config.json
+
+# 验证节点（不生成配置）
+python v2ray2singbox.py --validate-only --verbose
+
+# 同时导出Clash配置
+python v2ray2singbox.py --export-clash --clash-output clash.yaml
 ```
 
 参数说明：
-- `-i, --input`: 输入节点文件路径，默认为 `node.txt`
-- `-o, --output`: 输出配置文件路径，默认为 `config.json`
-- `-c, --config`: 设置文件路径，默认为 `settings.json`
+- `-i, --input`: 输入节点文件路径（默认：node.txt）
+- `-o, --output`: 输出sing-box配置文件路径（默认：config.json）
+- `-c, --config`: 设置文件路径（默认：settings.json）
+- `--validate-only`: 仅验证节点，不生成配置文件
+- `--export-clash`: 同时导出Clash配置（需要PyYAML）
+- `--clash-output`: Clash配置文件输出路径（默认：clash.yaml）
+- `--verbose, -v`: 显示详细输出
 
 ### 自定义配置
 
@@ -104,43 +120,121 @@ python v2ray2singbox.py [-i INPUT] [-o OUTPUT] [-c CONFIG]
 - `start_port`: 入站代理的起始端口号（每个节点会依次递增）
 - `listen`: 入站代理的监听地址（设为空字符串或 `::` 将监听所有地址）
 
-## 支持的节点格式
+## 支持的协议
 
-### VMess
+### 完全支持的协议
+- **VMess** - 支持所有传输协议 (TCP, WebSocket, gRPC, HTTP/2, QUIC)
+- **VLESS** - 支持所有传输协议和流控 (XTLS)
+- **Shadowsocks** - 支持所有加密方法，包括2022系列
+- **Trojan** - 支持所有传输协议
+- **Hysteria2** - 支持完整配置
+- **TUIC** - 支持v4/v5协议
+- **Hysteria** - 支持v1协议
+- **SSH** - 支持密码和密钥认证
+- **ShadowTLS** - 支持v2/v3协议
+- **WireGuard** - 基础支持
 
-```
-vmess://base64编码的json配置
+### 传输协议支持
+- **TCP** - 支持HTTP伪装
+- **WebSocket** - 支持早期数据
+- **gRPC** - 支持多路模式
+- **HTTP/2** - 完整支持
+- **QUIC** - 基础支持
+- **HTTPUpgrade** - 新协议支持
+
+### TLS特性支持
+- **标准TLS** - 完整支持
+- **uTLS指纹** - 支持多种指纹
+- **Reality** - 支持公钥和短ID
+- **ECH** - 实验性支持
+- **证书验证** - 可配置跳过
+
+### 加密方法支持
+#### Shadowsocks传统加密
+- AES-128/192/256-GCM/CFB/CTR
+- ChaCha20-IETF-Poly1305
+- XChaCha20-IETF-Poly1305
+
+#### Shadowsocks 2022系列
+- 2022-blake3-aes-128-gcm
+- 2022-blake3-aes-256-gcm
+- 2022-blake3-chacha20-poly1305
+
+## 使用方法
+
+### 基本使用
+
+1. 将节点链接放入 `node.txt` 文件中，每行一个节点
+2. 运行转换脚本：
+
+```bash
+python v2ray2singbox.py
 ```
 
-### Shadowsocks
+3. 生成的 `config.json` 文件即为 sing-box 配置文件
 
-```
-ss://base64编码的(method:password)@server:port#remarks
-```
+### 命令行选项
 
-或
+```bash
+# 基本转换
+python v2ray2singbox.py -i nodes.txt -o config.json
 
-```
-ss://base64编码的(method:password@server:port)#remarks
-```
+# 验证节点（不生成配置）
+python v2ray2singbox.py --validate-only -i nodes.txt --verbose
 
-### Trojan
+# 同时导出Clash配置
+python v2ray2singbox.py --export-clash --clash-output clash.yaml
 
-```
-trojan://password@server:port?sni=example.com&type=ws&path=/path#remarks
-```
+# 显示详细输出
+python v2ray2singbox.py --verbose
 
-### VLESS
-
-```
-vless://uuid@server:port?security=tls&type=ws&path=/path#remarks
+# 海外环境优化（从海外访问国内节点）
+python v2ray2singbox.py --overseas -i nodes.txt -o config.json
 ```
 
-### Hysteria2
+### 参数说明
+- `-i, --input`: 输入节点文件路径（默认：node.txt）
+- `-o, --output`: 输出sing-box配置文件路径（默认：config.json）
+- `-c, --config`: 设置文件路径（默认：settings.json）
+- `--validate-only`: 仅验证节点，不生成配置文件
+- `--export-clash`: 同时导出Clash配置
+- `--clash-output`: Clash配置文件输出路径（默认：clash.yaml）
+- `--verbose, -v`: 显示详细输出
+- `--overseas`: 海外环境优化模式（适用于从海外访问国内节点）
 
-```
-hysteria2://password@server:port?insecure=1&sni=example.com#remarks
-```
+### 新功能特性
+
+#### 🔍 节点验证
+- 自动验证节点配置的完整性
+- 详细的错误报告和警告信息
+- 支持仅验证模式，无需生成配置
+
+#### 📊 配置统计
+- 显示各协议节点数量统计
+- 配置文件结构分析
+- 成功/失败节点统计
+
+#### 🔄 多格式导出
+- 原生sing-box配置
+- Clash配置导出（实验性）
+- 支持自定义输出路径
+
+#### 🛡️ 增强的错误处理
+- 健壮的URL解析
+- 详细的错误信息
+- 自动跳过无效节点
+
+#### ⚡ 性能优化
+- 统一的协议解析框架
+- 优化的配置生成流程
+- 减少重复代码
+
+#### 🌍 海外环境优化
+- **海外访问优化**：专门针对从海外访问国内节点的优化
+- **多DNS服务器**：使用多个可靠的DNS服务器提高解析成功率
+- **连接超时优化**：增加连接超时时间适应跨国网络延迟
+- **故障转移机制**：自动在多个节点间切换，提高连接成功率
+- **域名解析策略**：优化域名解析策略，优先使用IPv4
 
 ## 注意事项
 

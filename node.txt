@@ -1,0 +1,17 @@
+# 示例节点文件
+# 请将你的节点链接放在这里，每行一个
+
+# VMess 示例
+# vmess://eyJ2IjoiMiIsInBzIjoidGVzdCIsImFkZCI6IjEyNy4wLjAuMSIsInBvcnQiOiI4MDgwIiwiaWQiOiIxMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWIiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ0ZXN0LmNvbSIsInBhdGgiOiIvdGVzdCIsInRscyI6InRscyJ9
+
+# VLESS 示例
+# vless://12345678-1234-1234-1234-123456789012@example.com:443?type=ws&path=/test&security=tls&sni=example.com#test-vless
+
+# Shadowsocks 示例
+# ss://YWVzLTI1Ni1nY206dGVzdHBhc3N3b3Jk@example.com:8388#test-ss
+
+# Trojan 示例
+# trojan://password@example.com:443?type=ws&path=/trojan&sni=example.com#test-trojan
+
+# Hysteria2 示例
+# hysteria2://password@example.com:443?sni=example.com#test-hysteria2

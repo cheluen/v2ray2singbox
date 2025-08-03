@@ -8,7 +8,9 @@ import base64
 import urllib.parse
 import uuid
 import argparse
-from typing import Dict, List, Any, Optional, Tuple
+import hashlib
+import ipaddress
+from typing import Dict, List, Any, Optional, Tuple, Union
 
 
 class V2raySingboxConverter:
@@ -20,15 +22,36 @@ class V2raySingboxConverter:
             'start_port': 30001,
             'listen': '127.0.0.1'
         }
-        
+
         # 尝试加载配置文件
         self.settings = self.load_settings(config_file)
-        
+
         # 初始化sing-box配置模板
         self.singbox_config = {
             "log": {
                 "level": "info",
                 "timestamp": True
+            },
+            "dns": {
+                "servers": [
+                    {
+                        "tag": "cloudflare",
+                        "address": "1.1.1.1",
+                        "strategy": "prefer_ipv4"
+                    },
+                    {
+                        "tag": "google",
+                        "address": "8.8.8.8",
+                        "strategy": "prefer_ipv4"
+                    },
+                    {
+                        "tag": "local",
+                        "address": "local",
+                        "detour": "direct"
+                    }
+                ],
+                "final": "cloudflare",
+                "strategy": "prefer_ipv4"
             },
             "inbounds": [],
             "outbounds": [],
@@ -36,6 +59,20 @@ class V2raySingboxConverter:
                 "rules": [],
                 "final": "direct"
             }
+        }
+
+        # 支持的协议列表
+        self.supported_protocols = {
+            'vmess': self.parse_vmess,
+            'vless': self.parse_vless,
+            'ss': self.parse_ss,
+            'trojan': self.parse_trojan,
+            'hysteria2': self.parse_hysteria2,
+            'hysteria': self.parse_hysteria,
+            'tuic': self.parse_tuic,
+            'wireguard': self.parse_wireguard,
+            'ssh': self.parse_ssh,
+            'shadowtls': self.parse_shadowtls
         }
     
     def load_settings(self, config_file: str) -> Dict[str, Any]:
@@ -53,6 +90,919 @@ class V2raySingboxConverter:
                 json.dump(self.default_settings, f, indent=4, ensure_ascii=False)
             print(f"已创建默认配置文件: {config_file}")
             return self.default_settings
+
+    def parse_url_params(self, url: str) -> Tuple[str, Dict[str, str]]:
+        """通用URL参数解析函数"""
+        params_dict = {}
+
+        # 处理备注信息
+        if '#' in url:
+            url, remark = url.split('#', 1)
+            params_dict['remark'] = urllib.parse.unquote(remark)
+
+        # 处理查询参数
+        if '?' in url:
+            url, params = url.split('?', 1)
+            for item in params.split('&'):
+                if '=' in item:
+                    k, v = item.split('=', 1)
+                    params_dict[k] = urllib.parse.unquote(v)
+
+        return url, params_dict
+
+    def safe_base64_decode(self, data: str) -> Optional[str]:
+        """安全的base64解码函数，自动处理填充"""
+        try:
+            # 移除可能的空白字符
+            data = data.strip()
+
+            # 添加填充
+            padding = 4 - len(data) % 4
+            if padding < 4:
+                data += '=' * padding
+
+            return base64.b64decode(data).decode('utf-8')
+        except Exception as e:
+            print(f"Base64解码失败: {e}")
+            return None
+
+    def is_valid_ip(self, ip: str) -> bool:
+        """检查是否为有效的IP地址"""
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except ValueError:
+            return False
+
+    def normalize_server_name(self, server: str, sni: str = '') -> str:
+        """标准化服务器名称，用于TLS SNI"""
+        if sni:
+            return sni
+
+        # 如果server是IP地址，返回空字符串
+        if self.is_valid_ip(server):
+            return ''
+
+        return server
+
+    def build_transport_config(self, transport_type: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """构建传输协议配置"""
+        if not transport_type or transport_type == 'tcp':
+            # TCP传输
+            transport = {"type": "tcp"}
+
+            # 处理HTTP伪装
+            if config.get('type') == 'http':
+                transport["header"] = {
+                    "type": "http",
+                    "request": {
+                        "version": "1.1",
+                        "method": "GET",
+                        "path": [config.get('path', '/')],
+                        "headers": {}
+                    }
+                }
+                if 'host' in config and config['host']:
+                    transport["header"]["request"]["headers"]["Host"] = [config['host']]
+
+            return transport
+
+        elif transport_type == 'ws':
+            # WebSocket传输
+            transport = {
+                "type": "ws",
+                "path": config.get('path', '/'),
+                "headers": {}
+            }
+
+            if 'host' in config and config['host']:
+                transport["headers"]["Host"] = config['host']
+
+            # 处理早期数据
+            if 'ed' in config:
+                try:
+                    transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
+                    transport["max_early_data"] = int(config['ed'])
+                except ValueError:
+                    pass
+
+            return transport
+
+        elif transport_type == 'grpc':
+            # gRPC传输
+            transport = {
+                "type": "grpc",
+                "service_name": config.get('path', config.get('serviceName', '')),
+                "multi_mode": config.get('mode', 'gun') == 'multi'
+            }
+
+            # 处理健康检查
+            if 'health_check' in config:
+                transport["health_check"] = bool(config['health_check'])
+
+            return transport
+
+        elif transport_type in ['h2', 'http']:
+            # HTTP/2传输
+            transport = {
+                "type": "http",
+                "host": [config.get('host', '')],
+                "path": config.get('path', '/')
+            }
+
+            # 处理HTTP方法
+            if 'method' in config:
+                transport["method"] = config['method']
+
+            return transport
+
+        elif transport_type == 'quic':
+            # QUIC传输
+            transport = {"type": "quic"}
+
+            # 处理QUIC安全类型
+            if 'header' in config:
+                header_type = config['header'].get('type', 'none')
+                if header_type != 'none':
+                    transport["header"] = {
+                        "type": header_type
+                    }
+
+            return transport
+
+        elif transport_type == 'kcp' or transport_type == 'mkcp':
+            # mKCP传输 (sing-box不直接支持，但可以尝试转换为其他协议)
+            print(f"警告: {transport_type} 传输协议在sing-box中不受支持，跳过传输配置")
+            return None
+
+        elif transport_type == 'httpupgrade':
+            # HTTPUpgrade传输
+            transport = {
+                "type": "httpupgrade",
+                "path": config.get('path', '/'),
+                "headers": {}
+            }
+
+            if 'host' in config and config['host']:
+                transport["headers"]["Host"] = config['host']
+
+            return transport
+
+        else:
+            print(f"不支持的传输协议: {transport_type}")
+            return None
+
+    def build_tls_config(self, config: Dict[str, Any], server: str = '') -> Optional[Dict[str, Any]]:
+        """构建TLS配置"""
+        tls_enabled = False
+        security = config.get('security', config.get('tls', ''))
+
+        # 检查是否启用TLS
+        if security in ['tls', 'reality', 'xtls']:
+            tls_enabled = True
+        elif config.get('tls') == 'tls' or config.get('tls') == '1':
+            tls_enabled = True
+
+        if not tls_enabled:
+            return None
+
+        tls = {
+            "enabled": True,
+            "server_name": self.normalize_server_name(server, config.get('sni', config.get('host', ''))),
+            "insecure": False
+        }
+
+        # 处理跳过证书验证
+        if (config.get('allowInsecure') in ['1', 'true', True] or
+            config.get('insecure') in ['1', 'true', True] or
+            config.get('skip-cert-verify') in ['1', 'true', True]):
+            tls["insecure"] = True
+
+        # 处理ALPN
+        if 'alpn' in config:
+            alpn = config['alpn']
+            if isinstance(alpn, str):
+                tls["alpn"] = alpn.split(',')
+            elif isinstance(alpn, list):
+                tls["alpn"] = alpn
+
+        # 处理uTLS指纹
+        if 'fp' in config or 'fingerprint' in config:
+            fingerprint = config.get('fp', config.get('fingerprint', ''))
+            if fingerprint:
+                tls["utls"] = {
+                    "enabled": True,
+                    "fingerprint": fingerprint
+                }
+
+        # 处理Reality配置
+        if security == 'reality':
+            if 'pbk' in config:
+                tls["reality"] = {
+                    "enabled": True,
+                    "public_key": config['pbk'],
+                    "short_id": config.get('sid', '')
+                }
+
+        # 处理ECH配置
+        if 'ech' in config:
+            tls["ech"] = {
+                "enabled": True,
+                "pq_signature_schemes_enabled": config.get('pq_signature_schemes_enabled', False),
+                "dynamic_record_sizing_disabled": config.get('dynamic_record_sizing_disabled', False)
+            }
+
+        # 处理证书相关配置
+        if 'certificate' in config:
+            tls["certificate"] = config['certificate']
+
+        if 'certificate_path' in config:
+            tls["certificate_path"] = config['certificate_path']
+
+        return tls
+
+    def process_ss_password(self, method: str, password: str) -> str:
+        """处理Shadowsocks密码，特别是2022系列加密"""
+        # 2022系列加密方式需要特殊处理
+        if method.startswith('2022-'):
+            # 检查密码格式
+            if ':' in password:
+                # 已经是正确的 key:salt 格式
+                return password
+
+            # 尝试解码Base64编码的密码
+            decoded = self.safe_base64_decode(password)
+            if decoded:
+                # 检查解码后的格式
+                if ':' in decoded:
+                    parts = decoded.split(':', 2)
+                    if len(parts) >= 3 and parts[0] == method:
+                        # 格式为 method:key:salt，返回 key:salt
+                        return f"{parts[1]}:{parts[2]}"
+                    elif len(parts) == 2:
+                        # 格式为 key:salt
+                        return decoded
+
+                # 如果解码后没有冒号，可能是单独的key，需要生成salt
+                if method == '2022-blake3-aes-256-gcm':
+                    # 对于blake3，如果只有key，生成一个随机salt
+                    import secrets
+                    salt = secrets.token_hex(16)
+                    return f"{decoded}:{salt}"
+
+            # 如果无法解析，返回原始密码
+            print(f"警告: 无法正确解析{method}的密码格式，使用原始密码")
+            return password
+
+        # 非2022系列加密，直接返回原始密码
+        return password
+
+    def get_supported_ss_methods(self) -> List[str]:
+        """获取支持的Shadowsocks加密方法"""
+        return [
+            # 传统加密方法
+            'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm',
+            'aes-128-cfb', 'aes-192-cfb', 'aes-256-cfb',
+            'aes-128-ctr', 'aes-192-ctr', 'aes-256-ctr',
+            'rc4-md5', 'chacha20', 'chacha20-ietf',
+            'chacha20-ietf-poly1305', 'xchacha20-ietf-poly1305',
+
+            # 2022系列加密方法
+            '2022-blake3-aes-128-gcm',
+            '2022-blake3-aes-256-gcm',
+            '2022-blake3-chacha20-poly1305'
+        ]
+
+    def parse_ss_plugin(self, params: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """解析Shadowsocks插件配置"""
+        plugin = params.get('plugin', '')
+        if not plugin:
+            return None
+
+        plugin_config = {}
+
+        if plugin == 'obfs-local' or plugin.startswith('obfs'):
+            # Simple-obfs插件
+            plugin_config["plugin"] = "obfs-local"
+            plugin_config["plugin_opts"] = {
+                "mode": params.get('obfs', params.get('obfs-local', 'http')),
+                "host": params.get('obfs-host', params.get('host', ''))
+            }
+
+        elif plugin == 'v2ray-plugin' or plugin.startswith('v2ray'):
+            # V2Ray插件
+            plugin_config["plugin"] = "v2ray-plugin"
+            plugin_opts = {
+                "mode": params.get('mode', 'websocket'),
+                "tls": params.get('tls', 'false') in ['true', '1', True],
+                "host": params.get('host', ''),
+                "path": params.get('path', '/')
+            }
+
+            # 处理服务器名称
+            if 'server' in params:
+                plugin_opts["server"] = params['server']
+
+            # 处理证书验证
+            if params.get('cert', '') or params.get('certRaw', ''):
+                plugin_opts["cert"] = params.get('cert', params.get('certRaw', ''))
+
+            plugin_config["plugin_opts"] = plugin_opts
+
+        elif plugin == 'kcptun':
+            # KCPTun插件 (sing-box可能不直接支持)
+            print("警告: KCPTun插件在sing-box中可能不受支持")
+            return None
+
+        elif plugin == 'cloak':
+            # Cloak插件
+            plugin_config["plugin"] = "cloak"
+            plugin_config["plugin_opts"] = {
+                "server": params.get('server', ''),
+                "uid": params.get('uid', ''),
+                "public_key": params.get('publickey', params.get('public_key', '')),
+                "ticket": params.get('ticket', '')
+            }
+
+        else:
+            print(f"不支持的Shadowsocks插件: {plugin}")
+            return None
+
+        return plugin_config
+
+    def parse_tuic(self, tuic_url: str) -> Optional[Dict[str, Any]]:
+        """解析TUIC链接并转换为sing-box出站配置"""
+        try:
+            if not tuic_url.startswith('tuic://'):
+                return None
+
+            url = tuic_url[7:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析认证信息和服务器信息
+            if '@' in url:
+                auth, server_port = url.split('@', 1)
+
+                # 解析UUID和密码
+                if ':' in auth:
+                    uuid_str, password = auth.split(':', 1)
+                else:
+                    uuid_str = auth
+                    password = params_dict.get('password', '')
+
+                # 解析服务器和端口
+                server, port = server_port.rsplit(':', 1)
+
+                # 创建出站配置
+                outbound = {
+                    "type": "tuic",
+                    "server": server,
+                    "server_port": int(port),
+                    "uuid": uuid_str,
+                    "password": password
+                }
+
+                # 处理拥塞控制算法
+                if 'congestion_control' in params_dict:
+                    outbound["congestion_control"] = params_dict['congestion_control']
+                elif 'cc' in params_dict:
+                    outbound["congestion_control"] = params_dict['cc']
+
+                # 处理UDP中继模式
+                if 'udp_relay_mode' in params_dict:
+                    outbound["udp_relay_mode"] = params_dict['udp_relay_mode']
+                elif 'udp_mode' in params_dict:
+                    outbound["udp_relay_mode"] = params_dict['udp_mode']
+
+                # 处理零RTT握手
+                if 'reduce_rtt' in params_dict:
+                    outbound["zero_rtt_handshake"] = params_dict['reduce_rtt'] in ['1', 'true', True]
+
+                # 处理心跳间隔
+                if 'heartbeat' in params_dict:
+                    try:
+                        outbound["heartbeat"] = f"{int(params_dict['heartbeat'])}s"
+                    except ValueError:
+                        pass
+
+                # 处理TLS配置
+                tls = self.build_tls_config(params_dict, server)
+                if tls:
+                    outbound["tls"] = tls
+                else:
+                    # TUIC默认需要TLS
+                    outbound["tls"] = {
+                        "enabled": True,
+                        "server_name": self.normalize_server_name(server, params_dict.get('sni', ''))
+                    }
+
+                return outbound
+
+        except Exception as e:
+            print(f"解析TUIC链接失败: {e}")
+
+        return None
+
+    def parse_hysteria(self, hy_url: str) -> Optional[Dict[str, Any]]:
+        """解析Hysteria v1链接并转换为sing-box出站配置"""
+        try:
+            if not hy_url.startswith('hysteria://'):
+                return None
+
+            url = hy_url[11:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析认证信息和服务器信息
+            if '@' in url:
+                auth, server_port = url.split('@', 1)
+                server, port = server_port.rsplit(':', 1)
+            else:
+                # 没有认证信息的格式
+                server, port = url.rsplit(':', 1)
+                auth = params_dict.get('auth', params_dict.get('password', ''))
+
+            # 创建出站配置
+            outbound = {
+                "type": "hysteria",
+                "server": server,
+                "server_port": int(port),
+                "auth_str": auth
+            }
+
+            # 处理上下行带宽
+            if 'upmbps' in params_dict:
+                try:
+                    outbound["up_mbps"] = int(params_dict['upmbps'])
+                except ValueError:
+                    pass
+            elif 'up' in params_dict:
+                try:
+                    outbound["up_mbps"] = int(params_dict['up'])
+                except ValueError:
+                    pass
+
+            if 'downmbps' in params_dict:
+                try:
+                    outbound["down_mbps"] = int(params_dict['downmbps'])
+                except ValueError:
+                    pass
+            elif 'down' in params_dict:
+                try:
+                    outbound["down_mbps"] = int(params_dict['down'])
+                except ValueError:
+                    pass
+
+            # 处理混淆
+            if 'obfsParam' in params_dict or 'obfs' in params_dict:
+                outbound["obfs"] = params_dict.get('obfsParam', params_dict.get('obfs', ''))
+
+            # 处理协议版本
+            if 'protocol' in params_dict:
+                outbound["protocol"] = params_dict['protocol']
+
+            # 处理接收窗口连接
+            if 'recv_window_conn' in params_dict:
+                try:
+                    outbound["recv_window_conn"] = int(params_dict['recv_window_conn'])
+                except ValueError:
+                    pass
+
+            # 处理接收窗口
+            if 'recv_window' in params_dict:
+                try:
+                    outbound["recv_window"] = int(params_dict['recv_window'])
+                except ValueError:
+                    pass
+
+            # 处理禁用MTU发现
+            if 'disable_mtu_discovery' in params_dict:
+                outbound["disable_mtu_discovery"] = params_dict['disable_mtu_discovery'] in ['1', 'true', True]
+
+            # 处理TLS配置
+            tls = self.build_tls_config(params_dict, server)
+            if tls:
+                outbound["tls"] = tls
+            else:
+                # Hysteria默认需要TLS
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": self.normalize_server_name(server, params_dict.get('peer', params_dict.get('sni', '')))
+                }
+
+            return outbound
+
+        except Exception as e:
+            print(f"解析Hysteria链接失败: {e}")
+
+        return None
+
+    def parse_wireguard(self, wg_url: str) -> Optional[Dict[str, Any]]:
+        """解析WireGuard链接并转换为sing-box出站配置"""
+        try:
+            if not wg_url.startswith('wireguard://'):
+                return None
+
+            url = wg_url[12:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # WireGuard配置通常包含在参数中
+            outbound = {
+                "type": "wireguard",
+                "server": params_dict.get('server', params_dict.get('endpoint', '').split(':')[0]),
+                "server_port": int(params_dict.get('port', params_dict.get('endpoint', ':0').split(':')[1] or 51820)),
+                "private_key": params_dict.get('private_key', params_dict.get('privatekey', '')),
+                "public_key": params_dict.get('public_key', params_dict.get('publickey', '')),
+                "pre_shared_key": params_dict.get('pre_shared_key', params_dict.get('presharedkey', ''))
+            }
+
+            # 处理本地地址
+            if 'address' in params_dict:
+                addresses = params_dict['address'].split(',')
+                outbound["local_address"] = [addr.strip() for addr in addresses]
+
+            # 处理对等节点
+            if 'peers' in params_dict:
+                # 这里可以扩展处理多个对等节点
+                pass
+
+            # 处理MTU
+            if 'mtu' in params_dict:
+                try:
+                    outbound["mtu"] = int(params_dict['mtu'])
+                except ValueError:
+                    pass
+
+            # 处理保持连接间隔
+            if 'persistent_keepalive' in params_dict:
+                try:
+                    outbound["persistent_keepalive"] = int(params_dict['persistent_keepalive'])
+                except ValueError:
+                    pass
+
+            return outbound
+
+        except Exception as e:
+            print(f"解析WireGuard链接失败: {e}")
+
+        return None
+
+    def parse_ssh(self, ssh_url: str) -> Optional[Dict[str, Any]]:
+        """解析SSH链接并转换为sing-box出站配置"""
+        try:
+            if not ssh_url.startswith('ssh://'):
+                return None
+
+            url = ssh_url[6:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析用户名、密码和服务器信息
+            if '@' in url:
+                auth, server_port = url.split('@', 1)
+
+                if ':' in auth:
+                    username, password = auth.split(':', 1)
+                else:
+                    username = auth
+                    password = params_dict.get('password', '')
+
+                server, port = server_port.rsplit(':', 1)
+            else:
+                server, port = url.rsplit(':', 1)
+                username = params_dict.get('user', params_dict.get('username', 'root'))
+                password = params_dict.get('password', '')
+
+            # 创建出站配置
+            outbound = {
+                "type": "ssh",
+                "server": server,
+                "server_port": int(port),
+                "user": username
+            }
+
+            # 处理认证方式
+            if password:
+                outbound["password"] = password
+
+            if 'private_key' in params_dict:
+                outbound["private_key"] = params_dict['private_key']
+
+            if 'private_key_path' in params_dict:
+                outbound["private_key_path"] = params_dict['private_key_path']
+
+            if 'private_key_passphrase' in params_dict:
+                outbound["private_key_passphrase"] = params_dict['private_key_passphrase']
+
+            # 处理主机密钥算法
+            if 'host_key_algorithms' in params_dict:
+                outbound["host_key_algorithms"] = params_dict['host_key_algorithms'].split(',')
+
+            # 处理客户端版本
+            if 'client_version' in params_dict:
+                outbound["client_version"] = params_dict['client_version']
+
+            return outbound
+
+        except Exception as e:
+            print(f"解析SSH链接失败: {e}")
+
+        return None
+
+    def parse_shadowtls(self, stls_url: str) -> Optional[Dict[str, Any]]:
+        """解析ShadowTLS链接并转换为sing-box出站配置"""
+        try:
+            if not stls_url.startswith('shadowtls://'):
+                return None
+
+            url = stls_url[12:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析认证信息和服务器信息
+            if '@' in url:
+                auth, server_port = url.split('@', 1)
+                server, port = server_port.rsplit(':', 1)
+            else:
+                server, port = url.rsplit(':', 1)
+                auth = params_dict.get('password', '')
+
+            # 创建出站配置
+            outbound = {
+                "type": "shadowtls",
+                "server": server,
+                "server_port": int(port),
+                "password": auth
+            }
+
+            # 处理版本
+            if 'version' in params_dict:
+                try:
+                    outbound["version"] = int(params_dict['version'])
+                except ValueError:
+                    pass
+
+            # 处理握手服务器
+            if 'sni' in params_dict:
+                outbound["handshake"] = {
+                    "server": params_dict['sni'],
+                    "server_port": 443
+                }
+
+            # 处理严格模式
+            if 'strict' in params_dict:
+                outbound["strict_mode"] = params_dict['strict'] in ['1', 'true', True]
+
+            return outbound
+
+        except Exception as e:
+            print(f"解析ShadowTLS链接失败: {e}")
+
+        return None
+
+    def validate_outbound_config(self, outbound: Dict[str, Any]) -> bool:
+        """验证出站配置的有效性"""
+        if not outbound or "type" not in outbound:
+            return False
+
+        outbound_type = outbound["type"]
+
+        # 检查必要字段
+        required_fields = {
+            "vmess": ["server", "server_port", "uuid"],
+            "vless": ["server", "server_port", "uuid"],
+            "shadowsocks": ["server", "server_port", "method", "password"],
+            "trojan": ["server", "server_port", "password"],
+            "hysteria": ["server", "server_port", "auth_str"],
+            "hysteria2": ["server", "server_port", "password"],
+            "tuic": ["server", "server_port", "uuid", "password"],
+            "wireguard": ["server", "server_port", "private_key", "public_key"],
+            "ssh": ["server", "server_port", "user"],
+            "shadowtls": ["server", "server_port", "password"]
+        }
+
+        if outbound_type in required_fields:
+            for field in required_fields[outbound_type]:
+                if field not in outbound or not outbound[field]:
+                    print(f"警告: {outbound_type}配置缺少必要字段: {field}")
+                    return False
+
+        # 检查端口范围
+        port = outbound.get("server_port", 0)
+        if not (1 <= port <= 65535):
+            print(f"警告: 无效的端口号: {port}")
+            return False
+
+        # 检查服务器地址
+        server = outbound.get("server", "")
+        if not server:
+            print("警告: 服务器地址为空")
+            return False
+
+        return True
+
+    def add_node_metadata(self, outbound: Dict[str, Any], node_url: str, index: int) -> Dict[str, Any]:
+        """为节点添加元数据"""
+        # 提取备注信息
+        if '#' in node_url:
+            remark = urllib.parse.unquote(node_url.split('#', 1)[1])
+            outbound["_remark"] = remark
+
+        # 添加索引
+        outbound["_index"] = index
+
+        # 添加原始URL（用于调试）
+        outbound["_original_url"] = node_url[:100] + "..." if len(node_url) > 100 else node_url
+
+        return outbound
+
+    def optimize_config(self, overseas_mode=False):
+        """优化sing-box配置"""
+        # 移除元数据字段（以_开头的字段）
+        for outbound in self.singbox_config["outbounds"]:
+            keys_to_remove = [key for key in outbound.keys() if key.startswith('_')]
+            for key in keys_to_remove:
+                del outbound[key]
+
+        # 海外环境优化
+        if overseas_mode:
+            self.apply_overseas_optimizations()
+
+        # 添加实验性配置
+        if "experimental" not in self.singbox_config:
+            self.singbox_config["experimental"] = {
+                "clash_api": {
+                    "external_controller": "127.0.0.1:9090",
+                    "external_ui": "ui",
+                    "secret": "",
+                    "external_ui_download_url": "https://mirror.ghproxy.com/https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip",
+                    "external_ui_download_detour": "direct",
+                    "default_mode": "rule"
+                }
+            }
+
+    def apply_overseas_optimizations(self):
+        """应用海外环境优化"""
+        print("应用海外环境优化...")
+
+        # 1. 调整DNS策略
+        if "dns" in self.singbox_config:
+            self.singbox_config["dns"]["strategy"] = "prefer_ipv4"
+            # 添加更多DNS服务器
+            dns_servers = self.singbox_config["dns"]["servers"]
+
+            # 添加更多可靠的DNS服务器
+            additional_servers = [
+                {
+                    "tag": "quad9",
+                    "address": "9.9.9.9",
+                    "strategy": "prefer_ipv4"
+                },
+                {
+                    "tag": "opendns",
+                    "address": "208.67.222.222",
+                    "strategy": "prefer_ipv4"
+                }
+            ]
+
+            for server in additional_servers:
+                if not any(s["tag"] == server["tag"] for s in dns_servers):
+                    dns_servers.append(server)
+
+        # 2. 优化出站配置
+        for outbound in self.singbox_config["outbounds"]:
+            if outbound.get("type") in ["shadowsocks", "vmess", "vless", "trojan"]:
+                # 增加连接超时
+                outbound["connect_timeout"] = "15s"
+
+                # 添加域名策略
+                outbound["domain_strategy"] = "prefer_ipv4"
+
+                # 添加绑定接口（如果需要）
+                # outbound["bind_interface"] = "eth0"
+
+        # 3. 添加故障转移规则
+        self.add_failover_rules()
+
+    def add_failover_rules(self):
+        """添加故障转移规则"""
+        # 为每个代理出站创建故障转移组
+        proxy_outbounds = [
+            outbound for outbound in self.singbox_config["outbounds"]
+            if outbound.get("type") in ["shadowsocks", "vmess", "vless", "trojan", "hysteria2"]
+        ]
+
+        if len(proxy_outbounds) > 1:
+            # 创建故障转移出站
+            failover_outbound = {
+                "type": "selector",
+                "tag": "proxy-group",
+                "outbounds": [outbound["tag"] for outbound in proxy_outbounds] + ["direct"]
+            }
+
+            self.singbox_config["outbounds"].insert(-1, failover_outbound)
+
+            # 更新路由规则使用故障转移组
+            for rule in self.singbox_config["route"]["rules"]:
+                if rule.get("outbound") in [outbound["tag"] for outbound in proxy_outbounds]:
+                    rule["outbound"] = "proxy-group"
+
+    def print_config_stats(self):
+        """打印配置统计信息"""
+        outbounds = self.singbox_config["outbounds"]
+        protocol_stats = {}
+
+        for outbound in outbounds:
+            if outbound["type"] not in ["direct", "block"]:
+                protocol = outbound["type"]
+                protocol_stats[protocol] = protocol_stats.get(protocol, 0) + 1
+
+        print("\n=== 配置统计 ===")
+        for protocol, count in sorted(protocol_stats.items()):
+            print(f"{protocol.upper()}: {count} 个节点")
+
+        print(f"入站代理: {len(self.singbox_config['inbounds'])} 个")
+        print(f"路由规则: {len(self.singbox_config['route']['rules'])} 条")
+
+    def export_clash_config(self, output_file: str = 'clash.yaml') -> bool:
+        """导出Clash格式配置（简化版）"""
+        try:
+            import yaml
+
+            clash_config = {
+                'port': 7890,
+                'socks-port': 7891,
+                'allow-lan': False,
+                'mode': 'rule',
+                'log-level': 'info',
+                'proxies': [],
+                'proxy-groups': [
+                    {
+                        'name': 'PROXY',
+                        'type': 'select',
+                        'proxies': []
+                    }
+                ],
+                'rules': [
+                    'MATCH,PROXY'
+                ]
+            }
+
+            # 转换代理节点
+            for outbound in self.singbox_config["outbounds"]:
+                if outbound["type"] not in ["direct", "block"]:
+                    clash_proxy = self.convert_to_clash_proxy(outbound)
+                    if clash_proxy:
+                        clash_config['proxies'].append(clash_proxy)
+                        clash_config['proxy-groups'][0]['proxies'].append(clash_proxy['name'])
+
+            with open(output_file, 'w', encoding='utf-8') as f:
+                yaml.dump(clash_config, f, default_flow_style=False, allow_unicode=True)
+
+            print(f"✓ Clash配置已导出: {output_file}")
+            return True
+
+        except ImportError:
+            print("警告: 缺少PyYAML库，无法导出Clash配置")
+            return False
+        except Exception as e:
+            print(f"导出Clash配置失败: {e}")
+            return False
+
+    def convert_to_clash_proxy(self, outbound: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """将sing-box出站配置转换为Clash代理配置"""
+        # 这里只实现基本转换，完整实现会很复杂
+        proxy_type = outbound["type"]
+
+        if proxy_type == "vmess":
+            return {
+                'name': outbound.get("tag", "vmess"),
+                'type': 'vmess',
+                'server': outbound["server"],
+                'port': outbound["server_port"],
+                'uuid': outbound["uuid"],
+                'alterId': outbound.get("alter_id", 0),
+                'cipher': outbound.get("security", "auto")
+            }
+        elif proxy_type == "shadowsocks":
+            return {
+                'name': outbound.get("tag", "ss"),
+                'type': 'ss',
+                'server': outbound["server"],
+                'port': outbound["server_port"],
+                'cipher': outbound["method"],
+                'password': outbound["password"]
+            }
+        # 可以继续添加其他协议的转换
+
+        return None
     
     def parse_nodes(self, node_file: str) -> List[str]:
         """解析节点文件，提取有效节点"""
@@ -64,8 +1014,8 @@ class V2raySingboxConverter:
             
             for line in lines:
                 line = line.strip()
-                # 跳过空行和不包含://的行（通常是分类标题）
-                if line and '://' in line:
+                # 跳过空行、注释行和不包含://的行
+                if line and not line.startswith('#') and '://' in line:
                     nodes.append(line)
         except Exception as e:
             print(f"解析节点文件失败: {e}")
@@ -95,92 +1045,54 @@ class V2raySingboxConverter:
     def parse_vmess(self, vmess_url: str) -> Optional[Dict[str, Any]]:
         """解析vmess链接并转换为sing-box出站配置"""
         try:
-            if vmess_url.startswith('vmess://'):
-                b64_content = vmess_url[8:]
-                # 某些实现可能有多余的填充字符
-                padding = 4 - len(b64_content) % 4
-                if padding < 4:
-                    b64_content += '=' * padding
-                
-                try:
-                    decoded = base64.b64decode(b64_content).decode('utf-8')
-                    vmess_info = json.loads(decoded)
-                except:
-                    # 尝试处理非标准格式
-                    decoded = base64.b64decode(b64_content).decode('utf-8', errors='ignore')
-                    vmess_info = json.loads(decoded)
-                
-                outbound = {
-                    "type": "vmess",
-                    "server": vmess_info.get('add', ''),
-                    "server_port": int(vmess_info.get('port', 0)),
-                    "uuid": vmess_info.get('id', ''),
-                    "security": vmess_info.get('scy', 'auto'),
-                    "alter_id": int(vmess_info.get('aid', 0))
-                }
-                
-                # 处理传输协议
-                transport_type = vmess_info.get('net', '')
-                if transport_type:
-                    transport = {}
-                    
-                    if transport_type == 'ws':
-                        transport = {
-                            "type": "ws",
-                            "path": vmess_info.get('path', '/'),
-                            "headers": {}
-                        }
-                        if 'host' in vmess_info:
-                            transport["headers"]["Host"] = vmess_info['host']
-                    
-                    elif transport_type == 'tcp':
-                        transport = {"type": "tcp"}
-                        if vmess_info.get('type') == 'http':
-                            transport["header"] = {
-                                "type": "http",
-                                "request": {
-                                    "version": "1.1",
-                                    "method": "GET",
-                                    "path": [vmess_info.get('path', '/')],
-                                    "headers": {}
-                                }
-                            }
-                            if 'host' in vmess_info:
-                                transport["header"]["request"]["headers"]["Host"] = [vmess_info['host']]
-                    
-                    elif transport_type == 'grpc':
-                        transport = {
-                            "type": "grpc",
-                            "service_name": vmess_info.get('path', ''),
-                            "multi_mode": False
-                        }
-                    
-                    elif transport_type == 'quic':
-                        transport = {"type": "quic"}
-                    
-                    elif transport_type == 'h2':
-                        transport = {
-                            "type": "http",
-                            "host": [vmess_info.get('host', '')],
-                            "path": vmess_info.get('path', '/')
-                        }
-                    
-                    outbound["transport"] = transport
-                
-                # 处理TLS
-                if vmess_info.get('tls') == 'tls':
-                    tls = {
-                        "enabled": True,
-                        "server_name": vmess_info.get('sni', vmess_info.get('host', ''))
-                    }
-                    
-                    # 处理跳过证书验证
-                    if vmess_info.get('verify_cert_chain', True) is False or vmess_info.get('allowInsecure', False):
-                        tls["insecure"] = True
-                    
-                    outbound["tls"] = tls
-                
-                return outbound
+            if not vmess_url.startswith('vmess://'):
+                return None
+
+            b64_content = vmess_url[8:]
+            decoded = self.safe_base64_decode(b64_content)
+            if not decoded:
+                return None
+
+            try:
+                vmess_info = json.loads(decoded)
+            except json.JSONDecodeError as e:
+                print(f"VMess JSON解析失败: {e}")
+                return None
+
+            # 验证必要字段
+            if not all(key in vmess_info for key in ['add', 'port', 'id']):
+                print("VMess配置缺少必要字段")
+                return None
+
+            outbound = {
+                "type": "vmess",
+                "server": vmess_info.get('add', ''),
+                "server_port": int(vmess_info.get('port', 0)),
+                "uuid": vmess_info.get('id', ''),
+                "security": vmess_info.get('scy', 'auto'),
+                "alter_id": int(vmess_info.get('aid', 0))
+            }
+
+            # 处理全局填充
+            if 'global_padding' in vmess_info:
+                outbound["global_padding"] = bool(vmess_info['global_padding'])
+
+            # 处理认证掩码
+            if 'authenticated_length' in vmess_info:
+                outbound["authenticated_length"] = bool(vmess_info['authenticated_length'])
+
+            # 处理传输协议
+            transport_type = vmess_info.get('net', 'tcp')
+            transport = self.build_transport_config(transport_type, vmess_info)
+            if transport:
+                outbound["transport"] = transport
+
+            # 处理TLS
+            tls = self.build_tls_config(vmess_info, outbound["server"])
+            if tls:
+                outbound["tls"] = tls
+
+            return outbound
         except Exception as e:
             print(f"解析vmess链接失败: {e}")
         
@@ -189,147 +1101,75 @@ class V2raySingboxConverter:
     def parse_ss(self, ss_url: str) -> Optional[Dict[str, Any]]:
         """解析ss链接并转换为sing-box出站配置"""
         try:
-            if ss_url.startswith('ss://'):
-                url = ss_url[5:]
-                # 处理有无@符号的情况
-                if '@' in url:
-                    # 格式: ss://BASE64(method:password)@server:port#remarks
-                    auth_str, server_port = url.split('@', 1)
-                    
-                    # 处理可能的base64编码
-                    try:
-                        decoded_auth = base64.b64decode(auth_str).decode('utf-8')
-                        method, password = decoded_auth.split(':', 1)
-                    except:
-                        # 可能已经是明文
-                        method, password = auth_str.split(':', 1)
-                    
-                    # 处理服务器和端口
-                    if '#' in server_port:
-                        server_port, _ = server_port.split('#', 1)
-                    
-                    server, port = server_port.rsplit(':', 1)
+            if not ss_url.startswith('ss://'):
+                return None
+
+            url = ss_url[5:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 处理有无@符号的情况
+            if '@' in url:
+                # 格式: ss://BASE64(method:password)@server:port 或 ss://method:password@server:port
+                auth_str, server_port = url.split('@', 1)
+
+                # 尝试base64解码
+                decoded_auth = self.safe_base64_decode(auth_str)
+                if decoded_auth and ':' in decoded_auth:
+                    method, password = decoded_auth.split(':', 1)
+                elif ':' in auth_str:
+                    # 明文格式
+                    method, password = auth_str.split(':', 1)
                 else:
-                    # 格式: ss://BASE64(method:password@server:port)#remarks
-                    if '#' in url:
-                        url, _ = url.split('#', 1)
-                    
-                    # 解码
-                    try:
-                        decoded = base64.b64decode(url).decode('utf-8')
-                    except:
-                        # 尝试添加填充
-                        padding = 4 - len(url) % 4
-                        if padding < 4:
-                            url += '=' * padding
-                        decoded = base64.b64decode(url).decode('utf-8')
-                    
-                    # 解析格式 method:password@server:port
-                    auth, server_port = decoded.split('@', 1)
-                    method, password = auth.split(':', 1)
-                    server, port = server_port.rsplit(':', 1)
-                
-                # 创建出站配置
-                outbound = {
-                    "type": "shadowsocks",
-                    "server": server,
-                    "server_port": int(port),
-                    "method": method,
-                    "password": password
+                    print("无法解析Shadowsocks认证信息")
+                    return None
+
+                server, port = server_port.rsplit(':', 1)
+            else:
+                # 格式: ss://BASE64(method:password@server:port)
+                decoded = self.safe_base64_decode(url)
+                if not decoded:
+                    return None
+
+                if '@' not in decoded:
+                    print("Shadowsocks URL格式错误")
+                    return None
+
+                # 解析格式 method:password@server:port
+                auth, server_port = decoded.split('@', 1)
+                if ':' not in auth:
+                    print("Shadowsocks认证格式错误")
+                    return None
+
+                method, password = auth.split(':', 1)
+                server, port = server_port.rsplit(':', 1)
+
+            # 创建出站配置（移到这里，两种格式都使用）
+            outbound = {
+                "type": "shadowsocks",
+                "server": server,
+                "server_port": int(port),
+                "method": method,
+                "password": self.process_ss_password(method, password)
+            }
+
+            # 处理插件配置
+            plugin_config = self.parse_ss_plugin(params_dict)
+            if plugin_config:
+                outbound.update(plugin_config)
+
+            # 处理多路复用
+            if 'mux' in params_dict:
+                outbound["multiplex"] = {
+                    "enabled": params_dict['mux'] in ['1', 'true', True],
+                    "protocol": "smux",
+                    "max_connections": 4,
+                    "min_streams": 4,
+                    "max_streams": 0
                 }
-                
-                # 特殊处理2022-blake3-aes-256-gcm加密方式
-                if method == '2022-blake3-aes-256-gcm':
-                    # 对于node.txt中的ss链接，密码部分是Base64编码的
-                    # 例如：MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TnpObFlqZ3lOREkxTkRkaE1ETXdaVEZpT0dFeVpqWm1OR1kzTW1GaU1EVT06TlRoak1UWmtPRFF0TmpZelppMDBaV015TFdJMU9ETXRNRFF6T0dZeU9EYz0=
-                    
-                    # 直接使用原始密码，不进行解码
-                    # 这是因为sing-box需要的格式是 key:salt，而不是解码后的格式
-                    # 对于这种特殊的加密方式，我们需要保持原始格式
-                    
-                    # 检查原始密码中是否已经包含冒号
-                    if ':' in password:
-                        # 已经是正确格式，不需要处理
-                        pass
-                    else:
-                        # 尝试从原始Base64编码中提取key和salt
-                        try:
-                            # 对于node.txt中的格式，我们需要特殊处理
-                            # 例如：MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TnpObFlqZ3lOREkxTkRkaE1ETXdaVEZpT0dFeVpqWm1OR1kzTW1GaU1EVT06TlRoak1UWmtPRFF0TmpZelppMDBaV015TFdJMU9ETXRNRFF6T0dZeU9EYz0=
-                            # 这个格式实际上是对 "2022-blake3-aes-256-gcm:key:salt" 进行Base64编码
-                            
-                            # 解码原始密码
-                            decoded = base64.b64decode(password).decode('utf-8')
-                            
-                            # 检查是否包含冒号
-                            if ':' in decoded:
-                                # 分割出加密方法和密码部分
-                                parts = decoded.split(':', 2)
-                                if len(parts) >= 3:
-                                    # 格式为 method:key:salt
-                                    _, key, salt = parts
-                                    # 使用正确的格式 key:salt
-                                    outbound["password"] = f"{key}:{salt}"
-                                    print(f"成功解析2022-blake3-aes-256-gcm密码")
-                                elif len(parts) == 2:
-                                    # 格式为 key:salt
-                                    key, salt = parts
-                                    outbound["password"] = f"{key}:{salt}"
-                                    print(f"成功解析2022-blake3-aes-256-gcm密码")
-                            else:
-                                # 如果解码后不包含冒号，可能是其他格式
-                                # 对于node.txt中的特殊格式，我们知道它是双重编码的
-                                # 第一部分是key，第二部分是salt
-                                print(f"警告：解码后的密码不包含冒号分隔符，尝试特殊处理")
-                                
-                                # 针对node.txt中的特殊格式
-                                # 例如：MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TnpObFlqZ3lOREkxTkRkaE1ETXdaVEZpT0dFeVpqWm1OR1kzTW1GaU1EVT06TlRoak1UWmtPRFF0TmpZelppMDBaV015TFdJMU9ETXRNRFF6T0dZeU9EYz0=
-                                # 这个格式中，实际上包含了两个Base64编码的部分
-                                
-                                # 直接使用原始密码，但添加冒号
-                                # 这是针对node.txt中的特殊格式
-                                outbound["password"] = "73eb8242547a030e1b8a2f6f4f72ab05:58c16d84-663f-4ec2-b583-0438f287a0f2"
-                                print(f"使用特殊格式的2022-blake3-aes-256-gcm密码")
-                        except Exception as e:
-                            print(f"解析2022-blake3-aes-256-gcm密码失败: {e}，使用特殊格式")
-                            # 针对node.txt中的特殊格式，直接使用硬编码的密码
-                            outbound["password"] = "73eb8242547a030e1b8a2f6f4f72ab05:58c16d84-663f-4ec2-b583-0438f287a0f2"
 
-
-                
-                # 处理插件 (如果有)
-                if ';' in server:
-                    server_parts = server.split(';')
-                    outbound["server"] = server_parts[0]
-                    
-                    # 解析插件参数
-                    plugin_parts = server_parts[1:]
-                    plugin_str = ';'.join(plugin_parts)
-                    
-                    if 'plugin=' in plugin_str:
-                        plugin_params = dict(item.split('=') for item in plugin_str.split(';') if '=' in item)
-                        plugin = plugin_params.get('plugin', '')
-                        
-                        if plugin == 'obfs-local':
-                            outbound["plugin"] = "obfs"
-                            outbound["plugin_opts"] = {
-                                "mode": plugin_params.get('obfs', 'http'),
-                                "host": plugin_params.get('obfs-host', '')
-                            }
-                        elif plugin == 'v2ray-plugin':
-                            # v2ray插件参数处理
-                            v2ray_opts = plugin_params.get('plugin-opts', '')
-                            if v2ray_opts:
-                                opts_dict = dict(item.split('=') for item in v2ray_opts.split(';') if '=' in item)
-                                outbound["plugin"] = "v2ray-plugin"
-                                outbound["plugin_opts"] = {
-                                    "mode": opts_dict.get('mode', 'websocket'),
-                                    "tls": opts_dict.get('tls', 'false') == 'true',
-                                    "host": opts_dict.get('host', ''),
-                                    "path": opts_dict.get('path', '/')
-                                }
-                
-                return outbound
+            return outbound
         except Exception as e:
             print(f"解析ss链接失败: {e}")
         
@@ -338,65 +1178,48 @@ class V2raySingboxConverter:
     def parse_trojan(self, trojan_url: str) -> Optional[Dict[str, Any]]:
         """解析trojan链接并转换为sing-box出站配置"""
         try:
-            if trojan_url.startswith('trojan://'):
-                url = trojan_url[9:]
-                
-                # 解析密码和服务器信息
-                if '@' in url:
-                    password, server_info = url.split('@', 1)
-                    
-                    # 处理查询参数和备注
-                    if '?' in server_info:
-                        server_port, params = server_info.split('?', 1)
-                        params_dict = dict(item.split('=') for item in params.split('&') if '=' in item)
-                    else:
-                        if '#' in server_info:
-                            server_port, _ = server_info.split('#', 1)
-                        else:
-                            server_port = server_info
-                        params_dict = {}
-                    
-                    # 解析服务器和端口
-                    server, port = server_port.rsplit(':', 1)
-                    
-                    # 创建出站配置
-                    outbound = {
-                        "type": "trojan",
-                        "server": server,
-                        "server_port": int(port),
-                        "password": password,
-                        "tls": {
-                            "enabled": True,
-                            "server_name": params_dict.get('sni', server),
-                            "insecure": False
-                        }
-                    }
-                    
-                    # 处理TLS安全选项
-                    if params_dict.get('allowInsecure', '0') == '1' or params_dict.get('insecure', '0') == '1':
-                        outbound["tls"]["insecure"] = True
-                    
-                    # 处理传输协议
-                    if 'type' in params_dict:
-                        transport_type = params_dict['type']
-                        
-                        if transport_type == 'ws':
-                            outbound["transport"] = {
-                                "type": "ws",
-                                "path": params_dict.get('path', '/'),
-                                "headers": {}
-                            }
-                            if 'host' in params_dict:
-                                outbound["transport"]["headers"]["Host"] = params_dict['host']
-                        
-                        elif transport_type == 'grpc':
-                            outbound["transport"] = {
-                                "type": "grpc",
-                                "service_name": params_dict.get('serviceName', ''),
-                                "multi_mode": False
-                            }
-                    
-                    return outbound
+            if not trojan_url.startswith('trojan://'):
+                return None
+
+            url = trojan_url[9:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析密码和服务器信息
+            if '@' not in url:
+                print("Trojan URL格式错误：缺少@符号")
+                return None
+
+            password, server_port = url.split('@', 1)
+            server, port = server_port.rsplit(':', 1)
+
+            # 创建出站配置
+            outbound = {
+                "type": "trojan",
+                "server": server,
+                "server_port": int(port),
+                "password": password
+            }
+
+            # 处理TLS配置（Trojan默认需要TLS）
+            tls = self.build_tls_config(params_dict, server)
+            if tls:
+                outbound["tls"] = tls
+            else:
+                # 默认TLS配置
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": self.normalize_server_name(server, params_dict.get('sni', ''))
+                }
+
+            # 处理传输协议
+            transport_type = params_dict.get('type', 'tcp')
+            transport = self.build_transport_config(transport_type, params_dict)
+            if transport:
+                outbound["transport"] = transport
+
+            return outbound
         except Exception as e:
             print(f"解析trojan链接失败: {e}")
         
@@ -405,103 +1228,47 @@ class V2raySingboxConverter:
     def parse_vless(self, vless_url: str) -> Optional[Dict[str, Any]]:
         """解析vless链接并转换为sing-box出站配置"""
         try:
-            if vless_url.startswith('vless://'):
-                url = vless_url[8:]
-                
-                # 解析UUID和服务器信息
-                if '@' in url:
-                    uuid_str, server_info = url.split('@', 1)
-                    
-                    # 处理备注信息
-                    if '#' in server_info:
-                        server_info, remark = server_info.split('#', 1)
-                    else:
-                        remark = ''
-                    
-                    # 处理查询参数
-                    if '?' in server_info:
-                        server_port, params = server_info.split('?', 1)
-                        params_list = params.split('&')
-                        params_dict = {}
-                        for item in params_list:
-                            if '=' in item:
-                                k, v = item.split('=', 1)
-                                # URL解码参数值
-                                params_dict[k] = urllib.parse.unquote(v)
-                    else:
-                        server_port = server_info
-                        params_dict = {}
-                    
-                    # 解析服务器和端口
-                    server, port = server_port.rsplit(':', 1)
-                    
-                    # 创建出站配置
-                    outbound = {
-                        "type": "vless",
-                        "server": server,
-                        "server_port": int(port),
-                        "uuid": uuid_str,
-                        "flow": params_dict.get('flow', '')
-                    }
-                    
-                    # 处理安全类型
-                    security = params_dict.get('security', 'none')
-                    if security == 'tls':
-                        tls = {
-                            "enabled": True,
-                            "server_name": params_dict.get('sni', ''),
-                            "insecure": False
-                        }
-                        
-                        # 处理跳过证书验证
-                        if params_dict.get('allowInsecure', '0') == '1' or params_dict.get('insecure', '0') == '1':
-                            tls["insecure"] = True
-                            
-                        # 处理指纹
-                        if 'fp' in params_dict:
-                            tls["utls"] = {
-                                "enabled": True,
-                                "fingerprint": params_dict.get('fp', 'chrome')
-                            }
-                        
-                        outbound["tls"] = tls
-                    
-                    # 处理传输协议
-                    transport_type = params_dict.get('type', '')
-                    if transport_type:
-                        if transport_type == 'ws':
-                            transport = {
-                                "type": "ws",
-                                "path": params_dict.get('path', '/'),
-                                "headers": {}
-                            }
-                            if 'host' in params_dict:
-                                transport["headers"]["Host"] = params_dict['host']
-                            
-                            outbound["transport"] = transport
-                        
-                        elif transport_type == 'grpc':
-                            transport = {
-                                "type": "grpc",
-                                "service_name": params_dict.get('serviceName', ''),
-                                "multi_mode": False
-                            }
-                            
-                            outbound["transport"] = transport
-                        
-                        elif transport_type == 'tcp':
-                            outbound["transport"] = {"type": "tcp"}
-                        
-                        elif transport_type == 'http':
-                            transport = {
-                                "type": "http",
-                                "host": [params_dict.get('host', '')],
-                                "path": params_dict.get('path', '/')
-                            }
-                            
-                            outbound["transport"] = transport
-                    
-                    return outbound
+            if not vless_url.startswith('vless://'):
+                return None
+
+            url = vless_url[8:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析UUID和服务器信息
+            if '@' not in url:
+                print("VLESS URL格式错误：缺少@符号")
+                return None
+
+            uuid_str, server_port = url.split('@', 1)
+            server, port = server_port.rsplit(':', 1)
+
+            # 创建出站配置
+            outbound = {
+                "type": "vless",
+                "server": server,
+                "server_port": int(port),
+                "uuid": uuid_str
+            }
+
+            # 处理流控
+            flow = params_dict.get('flow', '')
+            if flow:
+                outbound["flow"] = flow
+
+            # 处理TLS配置
+            tls = self.build_tls_config(params_dict, server)
+            if tls:
+                outbound["tls"] = tls
+
+            # 处理传输协议
+            transport_type = params_dict.get('type', 'tcp')
+            transport = self.build_transport_config(transport_type, params_dict)
+            if transport:
+                outbound["transport"] = transport
+
+            return outbound
         except Exception as e:
             print(f"解析vless链接失败: {e}")
         
@@ -510,74 +1277,63 @@ class V2raySingboxConverter:
     def parse_hysteria2(self, hy2_url: str) -> Optional[Dict[str, Any]]:
         """解析hysteria2链接并转换为sing-box出站配置"""
         try:
-            if hy2_url.startswith('hysteria2://'):
-                url = hy2_url[12:]
-                
-                # 解析认证信息和服务器信息
-                if '@' in url:
-                    auth, server_info = url.split('@', 1)
-                    
-                    # 处理备注信息
-                    if '#' in server_info:
-                        server_info, remark = server_info.split('#', 1)
-                    else:
-                        remark = ''
-                    
-                    # 处理查询参数
-                    if '?' in server_info:
-                        server_port, params = server_info.split('?', 1)
-                        params_list = params.split('&')
-                        params_dict = {}
-                        for item in params_list:
-                            if '=' in item:
-                                k, v = item.split('=', 1)
-                                # URL解码参数值
-                                params_dict[k] = urllib.parse.unquote(v)
-                    else:
-                        server_port = server_info
-                        params_dict = {}
-                    
-                    # 解析服务器和端口
-                    server, port = server_port.rsplit(':', 1)
-                    
-                    # 创建出站配置
-                    outbound = {
-                        "type": "hysteria2",
-                        "server": server,
-                        "server_port": int(port),
-                        "password": auth,
-                        "tls": {
-                            "enabled": True,
-                            "server_name": params_dict.get('sni', server),
-                            "insecure": False
-                        }
-                    }
-                    
-                    # 处理TLS安全选项
-                    if params_dict.get('insecure', '0') == '1':
-                        outbound["tls"]["insecure"] = True
-                    
-                    # 处理其他参数
-                    if 'obfs' in params_dict:
-                        outbound["obfs"] = params_dict['obfs']
-                    
-                    if 'obfs-password' in params_dict:
-                        outbound["obfs_password"] = params_dict['obfs-password']
-                    
-                    # 添加up和down参数（带宽控制）
-                    if 'up' in params_dict:
-                        try:
-                            outbound["up_mbps"] = int(params_dict['up'])
-                        except ValueError:
-                            pass
-                    
-                    if 'down' in params_dict:
-                        try:
-                            outbound["down_mbps"] = int(params_dict['down'])
-                        except ValueError:
-                            pass
-                    
-                    return outbound
+            if not hy2_url.startswith('hysteria2://'):
+                return None
+
+            url = hy2_url[12:]
+
+            # 解析URL和参数
+            url, params_dict = self.parse_url_params(url)
+
+            # 解析认证信息和服务器信息
+            if '@' not in url:
+                print("Hysteria2 URL格式错误：缺少@符号")
+                return None
+
+            auth, server_port = url.split('@', 1)
+            server, port = server_port.rsplit(':', 1)
+
+            # 创建出站配置
+            outbound = {
+                "type": "hysteria2",
+                "server": server,
+                "server_port": int(port),
+                "password": auth
+            }
+
+            # 处理TLS配置（Hysteria2默认需要TLS）
+            tls = self.build_tls_config(params_dict, server)
+            if tls:
+                outbound["tls"] = tls
+            else:
+                # 默认TLS配置
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": self.normalize_server_name(server, params_dict.get('sni', ''))
+                }
+
+            # 处理混淆
+            if 'obfs' in params_dict:
+                outbound["obfs"] = {
+                    "type": params_dict['obfs']
+                }
+                if 'obfs-password' in params_dict:
+                    outbound["obfs"]["password"] = params_dict['obfs-password']
+
+            # 处理带宽控制
+            if 'up' in params_dict:
+                try:
+                    outbound["up_mbps"] = int(params_dict['up'])
+                except ValueError:
+                    pass
+
+            if 'down' in params_dict:
+                try:
+                    outbound["down_mbps"] = int(params_dict['down'])
+                except ValueError:
+                    pass
+
+            return outbound
         except Exception as e:
             print(f"解析hysteria2链接失败: {e}")
         
@@ -585,21 +1341,25 @@ class V2raySingboxConverter:
     
     def convert_node(self, node_url: str) -> Optional[Dict[str, Any]]:
         """根据节点URL类型调用相应的解析函数"""
-        if node_url.startswith('vmess://'):
-            return self.parse_vmess(node_url)
-        elif node_url.startswith('ss://'):
-            return self.parse_ss(node_url)
-        elif node_url.startswith('trojan://'):
-            return self.parse_trojan(node_url)
-        elif node_url.startswith('vless://'):
-            return self.parse_vless(node_url)
-        elif node_url.startswith('hysteria2://'):
-            return self.parse_hysteria2(node_url)
+        # 提取协议类型
+        if '://' not in node_url:
+            print(f"无效的节点URL格式: {node_url[:50]}...")
+            return None
+
+        protocol = node_url.split('://', 1)[0].lower()
+
+        # 使用协议映射表
+        if protocol in self.supported_protocols:
+            try:
+                return self.supported_protocols[protocol](node_url)
+            except Exception as e:
+                print(f"解析{protocol}节点失败: {e}")
+                return None
         else:
-            print(f"不支持的节点类型: {node_url[:10]}...")
+            print(f"不支持的协议类型: {protocol}")
             return None
     
-    def generate_config(self, node_file: str, output_file: str = 'config.json') -> bool:
+    def generate_config(self, node_file: str, output_file: str = 'config.json', overseas_mode: bool = False) -> bool:
         """生成sing-box配置文件"""
         try:
             # 解析节点
@@ -614,43 +1374,82 @@ class V2raySingboxConverter:
             start_port = self.settings.get('start_port', 30001)
             
             # 处理每个节点
+            successful_nodes = 0
+            failed_nodes = 0
+
             for i, node_url in enumerate(nodes):
-                # 生成端口号
-                port = start_port + i
-                
-                # 生成入站标签
-                tag = f"in_{i}"
-                
-                # 创建入站配置
-                inbound = self.create_inbound(tag, port)
-                self.singbox_config["inbounds"].append(inbound)
-                
+                print(f"正在处理节点 {i+1}/{len(nodes)}...")
+
                 # 转换节点为出站配置
                 outbound = self.convert_node(node_url)
                 if outbound:
+                    # 验证配置
+                    if not self.validate_outbound_config(outbound):
+                        print(f"节点 {i+1} 配置验证失败，跳过")
+                        failed_nodes += 1
+                        continue
+
+                    # 添加元数据
+                    outbound = self.add_node_metadata(outbound, node_url, i)
+
+                    # 生成端口号
+                    port = start_port + successful_nodes
+
+                    # 生成入站标签
+                    tag = f"in_{successful_nodes}"
+
+                    # 创建入站配置
+                    inbound = self.create_inbound(tag, port)
+                    self.singbox_config["inbounds"].append(inbound)
+
                     # 设置出站标签
-                    outbound["tag"] = f"proxy_{i}"
+                    outbound["tag"] = f"proxy_{successful_nodes}"
                     self.singbox_config["outbounds"].append(outbound)
-                    
+
                     # 添加路由规则
                     self.singbox_config["route"]["rules"].append({
                         "inbound": [tag],
                         "outbound": outbound["tag"]
                     })
-                    
-                    print(f"节点 {i+1} 配置成功，入站端口: {port}")
-            
+
+                    protocol = outbound["type"]
+                    remark = outbound.get("_remark", f"节点{i+1}")
+                    print(f"✓ 节点 {i+1} ({protocol}) 配置成功，入站端口: {port}，备注: {remark}")
+                    successful_nodes += 1
+                else:
+                    print(f"✗ 节点 {i+1} 解析失败，跳过")
+                    failed_nodes += 1
+
+            print(f"\n配置完成: 成功 {successful_nodes} 个，失败 {failed_nodes} 个")
+
+            if successful_nodes == 0:
+                print("没有成功配置的节点，取消生成配置文件")
+                return False
+
             # 添加默认出站
-            self.singbox_config["outbounds"].append({
-                "type": "direct",
-                "tag": "direct"
-            })
-            
+            self.singbox_config["outbounds"].extend([
+                {
+                    "type": "direct",
+                    "tag": "direct"
+                },
+                {
+                    "type": "block",
+                    "tag": "block"
+                }
+            ])
+
+            # 优化配置
+            self.optimize_config(overseas_mode=overseas_mode)
+
+            # 生成配置统计
+            self.print_config_stats()
+
             # 写入配置文件
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(self.singbox_config, f, indent=2, ensure_ascii=False)
-            
-            print(f"配置文件已生成: {output_file}")
+
+            print(f"\n✓ 配置文件已生成: {output_file}")
+            print(f"✓ 总共配置了 {successful_nodes} 个代理节点")
             return True
         
         except Exception as e:
@@ -659,23 +1458,89 @@ class V2raySingboxConverter:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='将v2ray节点转换为sing-box配置')
-    parser.add_argument('-i', '--input', default='node.txt', help='输入节点文件路径')
-    parser.add_argument('-o', '--output', default='config.json', help='输出配置文件路径')
-    parser.add_argument('-c', '--config', default='settings.json', help='设置文件路径')
-    
-    # 无论是否有参数，都使用默认值
+    parser = argparse.ArgumentParser(
+        description='将v2ray节点转换为sing-box配置',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+支持的协议:
+  VMess, VLESS, Shadowsocks, Trojan, Hysteria, Hysteria2,
+  TUIC, WireGuard, SSH, ShadowTLS
+
+示例:
+  python v2ray2singbox.py -i nodes.txt -o config.json
+  python v2ray2singbox.py --export-clash --clash-output clash.yaml
+        """
+    )
+
+    parser.add_argument('-i', '--input', default='node.txt',
+                       help='输入节点文件路径 (默认: node.txt)')
+    parser.add_argument('-o', '--output', default='config.json',
+                       help='输出sing-box配置文件路径 (默认: config.json)')
+    parser.add_argument('-c', '--config', default='settings.json',
+                       help='设置文件路径 (默认: settings.json)')
+    parser.add_argument('--export-clash', action='store_true',
+                       help='同时导出Clash配置')
+    parser.add_argument('--clash-output', default='clash.yaml',
+                       help='Clash配置文件输出路径 (默认: clash.yaml)')
+    parser.add_argument('--validate-only', action='store_true',
+                       help='仅验证节点，不生成配置文件')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='显示详细输出')
+    parser.add_argument('--overseas', action='store_true',
+                       help='海外环境优化模式（适用于从海外访问国内节点）')
+
     args = parser.parse_args()
-    
-    # 创建转换器并生成配置
+
+    print("=== V2Ray to Sing-box 转换器 ===")
+    print(f"输入文件: {args.input}")
+    print(f"输出文件: {args.output}")
+    print(f"设置文件: {args.config}")
+    print()
+
+    # 创建转换器
     converter = V2raySingboxConverter(args.config)
-    success = converter.generate_config(args.input, args.output)
-    
+
+    if args.validate_only:
+        # 仅验证模式
+        nodes = converter.parse_nodes(args.input)
+        if not nodes:
+            print("未找到有效节点")
+            return False
+
+        print(f"找到 {len(nodes)} 个节点，开始验证...")
+        valid_count = 0
+
+        for i, node_url in enumerate(nodes):
+            outbound = converter.convert_node(node_url)
+            if outbound and converter.validate_outbound_config(outbound):
+                valid_count += 1
+                if args.verbose:
+                    protocol = outbound["type"]
+                    remark = outbound.get("_remark", f"节点{i+1}")
+                    print(f"✓ 节点 {i+1} ({protocol}): {remark}")
+            else:
+                if args.verbose:
+                    print(f"✗ 节点 {i+1}: 验证失败")
+
+        print(f"\n验证完成: {valid_count}/{len(nodes)} 个节点有效")
+        return valid_count > 0
+
+    # 生成配置
+    success = converter.generate_config(args.input, args.output, overseas_mode=args.overseas)
+
     if success:
-        print("配置生成成功，可以使用sing-box运行此配置")
+        print("\n✓ Sing-box配置生成成功！")
+
+        # 导出Clash配置
+        if args.export_clash:
+            converter.export_clash_config(args.clash_output)
+
+        print(f"\n使用方法:")
+        print(f"  sing-box run -c {args.output}")
+
     else:
-        print("配置生成失败，请检查节点文件和设置")
-    
+        print("\n✗ 配置生成失败，请检查节点文件和设置")
+
     return success
 
 
