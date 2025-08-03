@@ -1,17 +1,20 @@
-# 示例节点文件
-# 请将你的节点链接放在这里，每行一个
+# 测试节点文件
+# 包含各种协议的测试节点
 
-# VMess 示例
-# vmess://eyJ2IjoiMiIsInBzIjoidGVzdCIsImFkZCI6IjEyNy4wLjAuMSIsInBvcnQiOiI4MDgwIiwiaWQiOiIxMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWIiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ0ZXN0LmNvbSIsInBhdGgiOiIvdGVzdCIsInRscyI6InRscyJ9
+# VMess 测试节点
+vmess://eyJ2IjoiMiIsInBzIjoidGVzdC12bWVzcyIsImFkZCI6IjEyNy4wLjAuMSIsInBvcnQiOiI4MDgwIiwiaWQiOiIxMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWIiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ0ZXN0LmNvbSIsInBhdGgiOiIvdGVzdCIsInRscyI6InRscyJ9
 
-# VLESS 示例
-# vless://12345678-1234-1234-1234-123456789012@example.com:443?type=ws&path=/test&security=tls&sni=example.com#test-vless
+# VLESS 测试节点
+vless://12345678-1234-1234-1234-123456789012@example.com:443?type=ws&path=/test&security=tls&sni=example.com#test-vless
 
-# Shadowsocks 示例
-# ss://YWVzLTI1Ni1nY206dGVzdHBhc3N3b3Jk@example.com:8388#test-ss
+# Shadowsocks 普通加密测试节点
+ss://YWVzLTI1Ni1nY206dGVzdHBhc3N3b3Jk@example.com:8388#test-ss-aes256
 
-# Trojan 示例
-# trojan://password@example.com:443?type=ws&path=/trojan&sni=example.com#test-trojan
+# Shadowsocks 2022-blake3-aes-256-gcm 测试节点（这是关键的测试节点）
+ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TnpObFlqZ3lOREkxTkRkaE1ETXdaVEZpT0dFeVpqWm1OR1kzTW1GaU1EVT06TlRoak1UWmtPRFF0TmpZelppMDBaV015TFdJMU9ETXRNRFF6T0dZeU9EYz0=@test.example.com:8388#test-ss-2022-blake3
 
-# Hysteria2 示例
-# hysteria2://password@example.com:443?sni=example.com#test-hysteria2
+# Trojan 测试节点
+trojan://testpassword@example.com:443?type=ws&path=/trojan&sni=example.com#test-trojan
+
+# Hysteria2 测试节点
+hysteria2://testpassword@example.com:443?sni=example.com#test-hysteria2
