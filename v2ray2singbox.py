@@ -461,6 +461,9 @@ class V2raySingboxConverter:
                     # 注意：sing-box的VLESS不需要encryption字段，这是V2Ray/Xray特有的
                     # encryption参数在VLESS URL中存在但在sing-box配置中不使用
 
+                    # 添加UDP包编码设置，对于VLESS很重要
+                    outbound["packet_encoding"] = "xudp"
+
                     # 处理安全类型
                     security = params_dict.get('security', 'none')
                     if security == 'tls':
@@ -496,6 +499,11 @@ class V2raySingboxConverter:
                             }
                             if 'host' in params_dict and params_dict.get('host'):
                                 transport["headers"] = {"Host": params_dict['host']}
+
+                            # 添加WebSocket的early data配置，这对某些服务器很重要
+                            # 根据V2Ray/Xray的标准，通常设置为2048
+                            transport["max_early_data"] = 2048
+                            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
 
                             outbound["transport"] = transport
 
