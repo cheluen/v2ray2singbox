@@ -1,3 +1,20 @@
-vless://69614ecf-fe1a-4ab5-8b35-0f731b0913fb@jiasu.bxvpn.xyz:2052?encryption=none&security=none&type=ws&host=baofengxuemeiguo.373799.xyz&path=%2F#%E7%BE%8E%E5%9B%BD%2B01%2B%E8%A7%A3%E9%94%81%7C%E4%B8%89%E7%BD%91%E4%BC%98%E5%8C%96%2B1.0x
-vless://69614ecf-fe1a-4ab5-8b35-0f731b0913fb@jiasu.bxvpn.xyz:2052?encryption=none&security=none&type=ws&host=baofengxuemeiguo.373799.xyz&path=%2F#%E7%BE%8E%E5%9B%BD%2B02%2B%E8%A7%A3%E9%94%81%7C%E4%B8%89%E7%BD%91%E4%BC%98%E5%8C%96%2B1.0x
-vless://69614ecf-fe1a-4ab5-8b35-0f731b0913fb@jiasu.bxvpn.xyz:2052?encryption=none&security=none&type=ws&host=baofengxuemeiguo.373799.xyz&path=%2F#%E7%BE%8E%E5%9B%BD%2B03%2B%E8%A7%A3%E9%94%81%7C%E4%B8%89%E7%BD%91%E4%BC%98%E5%8C%96%2B1.0x
+# 测试节点文件
+# 包含各种协议的测试节点
+
+# VMess 测试节点
+vmess://eyJ2IjoiMiIsInBzIjoidGVzdC12bWVzcyIsImFkZCI6IjEyNy4wLjAuMSIsInBvcnQiOiI4MDgwIiwiaWQiOiIxMjM0NTY3OC0xMjM0LTEyMzQtMTIzNC0xMjM0NTY3ODkwYWIiLCJhaWQiOiIwIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ0ZXN0LmNvbSIsInBhdGgiOiIvdGVzdCIsInRscyI6InRscyJ9
+
+# VLESS 测试节点 (security=none)
+vless://12345678-1234-1234-1234-123456789012@example.com:443?encryption=none&security=none&type=ws&host=example.com&path=/test#test-vless-none
+
+# VLESS 测试节点 (security=tls)
+vless://12345678-1234-1234-1234-123456789012@example.com:443?type=ws&path=/test&security=tls&sni=example.com#test-vless-tls
+
+# Shadowsocks 普通加密测试节点
+ss://YWVzLTI1Ni1nY206dGVzdHBhc3N3b3Jk@example.com:8388#test-ss-aes256
+
+# Trojan 测试节点
+trojan://testpassword@example.com:443?type=ws&path=/trojan&sni=example.com#test-trojan
+
+# Hysteria2 测试节点
+hysteria2://testpassword@example.com:443?sni=example.com#test-hysteria2

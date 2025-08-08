@@ -3,6 +3,7 @@
 
 import json
 import urllib.parse
+import sys
 
 def parse_vless_url(url):
     """解析VLESS URL并显示详细信息"""
@@ -70,8 +71,18 @@ def parse_vless_url(url):
             "type": "ws",
             "path": params_dict.get('path', '/')
         }
+        
+        # 设置WebSocket头部
+        headers = {}
         if 'host' in params_dict and params_dict.get('host'):
-            transport["headers"] = {"Host": params_dict['host']}
+            headers["Host"] = params_dict['host']
+        
+        # 添加User-Agent头部
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        
+        if headers:
+            transport["headers"] = headers
+        
         config["transport"] = transport
     
     # 处理安全类型
@@ -87,18 +98,26 @@ def parse_vless_url(url):
     return config
 
 def main():
-    # 测试你的VLESS URL
-    vless_urls = [
-        "vless://69614ecf-fe1a-4ab5-8b35-0f731b0913fb@jiasu.bxvpn.xyz:2052?encryption=none&security=none&type=ws&host=baofengxuemeiguo.373799.xyz&path=%2F#%E7%BE%8E%E5%9B%BD%2B01%2B%E8%A7%A3%E9%94%81%7C%E4%B8%89%E7%BD%91%E4%BC%98%E5%8C%96%2B1.0x"
-    ]
-    
-    for i, url in enumerate(vless_urls, 1):
-        print(f"=== 测试节点 {i} ===")
-        config = parse_vless_url(url)
+    if len(sys.argv) > 1:
+        # 如果提供了命令行参数，使用它作为VLESS URL
+        vless_url = sys.argv[1]
+        print("=== 解析用户提供的VLESS节点 ===")
+        config = parse_vless_url(vless_url)
         if config:
             print("生成的sing-box配置:")
             print(json.dumps(config, indent=2, ensure_ascii=False))
+    else:
+        # 使用示例节点进行测试
+        print("=== 使用示例节点测试 ===")
+        print("用法: python3 test_vless.py 'vless://your-vless-url-here'")
         print()
+        
+        # 示例节点（非真实节点）
+        example_url = "vless://12345678-1234-1234-1234-123456789012@example.com:443?encryption=none&security=none&type=ws&host=example.com&path=/test#example-node"
+        config = parse_vless_url(example_url)
+        if config:
+            print("生成的sing-box配置:")
+            print(json.dumps(config, indent=2, ensure_ascii=False))
 
 if __name__ == '__main__':
     main()
