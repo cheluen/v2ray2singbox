@@ -115,10 +115,9 @@ class V2raySingboxConverter:
                     "server": vmess_info.get('add', ''),
                     "server_port": int(vmess_info.get('port', 0)),
                     "uuid": vmess_info.get('id', ''),
-                    "security": vmess_info.get('scy', 'auto'),
-                    "alter_id": int(vmess_info.get('aid', 0))
+                    "security": vmess_info.get('scy', 'auto')
                 }
-                
+
                 # 处理传输协议
                 transport_type = vmess_info.get('net', '')
                 if transport_type:
@@ -127,12 +126,11 @@ class V2raySingboxConverter:
                     if transport_type == 'ws':
                         transport = {
                             "type": "ws",
-                            "path": vmess_info.get('path', '/'),
-                            "headers": {}
+                            "path": vmess_info.get('path', '/')
                         }
-                        if 'host' in vmess_info:
-                            transport["headers"]["Host"] = vmess_info['host']
-                    
+                        if 'host' in vmess_info and vmess_info.get('host'):
+                            transport["headers"] = {"Host": vmess_info['host']}
+
                     elif transport_type == 'tcp':
                         transport = {"type": "tcp"}
                         if vmess_info.get('type') == 'http':
@@ -141,13 +139,12 @@ class V2raySingboxConverter:
                                 "request": {
                                     "version": "1.1",
                                     "method": "GET",
-                                    "path": [vmess_info.get('path', '/')],
-                                    "headers": {}
+                                    "path": [vmess_info.get('path', '/')]
                                 }
                             }
-                            if 'host' in vmess_info:
-                                transport["header"]["request"]["headers"]["Host"] = [vmess_info['host']]
-                    
+                            if 'host' in vmess_info and vmess_info.get('host'):
+                                transport["header"]["request"]["headers"] = {"Host": [vmess_info['host']]}
+
                     elif transport_type == 'grpc':
                         transport = {
                             "type": "grpc",
@@ -382,7 +379,7 @@ class V2raySingboxConverter:
                         "password": password,
                         "tls": {
                             "enabled": True,
-                            "server_name": params_dict.get('sni', server),
+                            "server_name": params_dict.get('sni', params_dict.get('host', server)),
                             "insecure": False
                         }
                     }
@@ -396,14 +393,11 @@ class V2raySingboxConverter:
                         transport_type = params_dict['type']
                         
                         if transport_type == 'ws':
-                            outbound["transport"] = {
-                                "type": "ws",
-                                "path": params_dict.get('path', '/'),
-                                "headers": {}
-                            }
-                            if 'host' in params_dict:
-                                outbound["transport"]["headers"]["Host"] = params_dict['host']
-                        
+                            ws = {"type": "ws", "path": params_dict.get('path', '/')}
+                            if 'host' in params_dict and params_dict.get('host'):
+                                ws["headers"] = {"Host": params_dict['host']}
+                            outbound["transport"] = ws
+
                         elif transport_type == 'grpc':
                             outbound["transport"] = {
                                 "type": "grpc",
@@ -460,26 +454,30 @@ class V2raySingboxConverter:
                         "flow": params_dict.get('flow', '')
                     }
 
+                    # 如果 flow 为空，避免输出空字段以提升兼容性
+                    if not outbound.get("flow"):
+                        outbound.pop("flow", None)
+
                     # 处理安全类型
                     security = params_dict.get('security', 'none')
                     if security == 'tls':
                         tls = {
                             "enabled": True,
-                            "server_name": params_dict.get('sni', ''),
+                            "server_name": params_dict.get('sni', params_dict.get('host', server)),
                             "insecure": False
                         }
-                        
+
                         # 处理跳过证书验证
                         if params_dict.get('allowInsecure', '0') == '1' or params_dict.get('insecure', '0') == '1':
                             tls["insecure"] = True
                             
                         # 处理指纹
-                        if 'fp' in params_dict:
+                        if 'fp' in params_dict and params_dict.get('fp'):
                             tls["utls"] = {
                                 "enabled": True,
                                 "fingerprint": params_dict.get('fp', 'chrome')
                             }
-                        
+
                         outbound["tls"] = tls
                     
                     # 处理传输协议
@@ -488,14 +486,13 @@ class V2raySingboxConverter:
                         if transport_type == 'ws':
                             transport = {
                                 "type": "ws",
-                                "path": params_dict.get('path', '/'),
-                                "headers": {}
+                                "path": params_dict.get('path', '/')
                             }
-                            if 'host' in params_dict:
-                                transport["headers"]["Host"] = params_dict['host']
-                            
+                            if 'host' in params_dict and params_dict.get('host'):
+                                transport["headers"] = {"Host": params_dict['host']}
+
                             outbound["transport"] = transport
-                        
+
                         elif transport_type == 'grpc':
                             transport = {
                                 "type": "grpc",
