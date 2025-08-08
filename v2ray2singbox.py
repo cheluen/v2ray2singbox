@@ -450,13 +450,16 @@ class V2raySingboxConverter:
                         "type": "vless",
                         "server": server,
                         "server_port": int(port),
-                        "uuid": uuid_str,
-                        "flow": params_dict.get('flow', '')
+                        "uuid": uuid_str
                     }
 
-                    # 如果 flow 为空，避免输出空字段以提升兼容性
-                    if not outbound.get("flow"):
-                        outbound.pop("flow", None)
+                    # 处理flow字段
+                    flow = params_dict.get('flow', '')
+                    if flow:
+                        outbound["flow"] = flow
+
+                    # 注意：sing-box的VLESS不需要encryption字段，这是V2Ray/Xray特有的
+                    # encryption参数在VLESS URL中存在但在sing-box配置中不使用
 
                     # 处理安全类型
                     security = params_dict.get('security', 'none')
@@ -470,7 +473,7 @@ class V2raySingboxConverter:
                         # 处理跳过证书验证
                         if params_dict.get('allowInsecure', '0') == '1' or params_dict.get('insecure', '0') == '1':
                             tls["insecure"] = True
-                            
+
                         # 处理指纹
                         if 'fp' in params_dict and params_dict.get('fp'):
                             tls["utls"] = {
@@ -479,6 +482,9 @@ class V2raySingboxConverter:
                             }
 
                         outbound["tls"] = tls
+                    elif security == 'none':
+                        # 当security为none时，不添加TLS配置
+                        pass
                     
                     # 处理传输协议
                     transport_type = params_dict.get('type', '')
