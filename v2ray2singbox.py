@@ -456,9 +456,10 @@ class V2raySingboxConverter:
                         "server": server,
                         "server_port": int(port),
                         "uuid": uuid_str,
+                        "encryption": params_dict.get('encryption', 'none'),
                         "flow": params_dict.get('flow', '')
                     }
-                    
+
                     # 处理安全类型
                     security = params_dict.get('security', 'none')
                     if security == 'tls':
