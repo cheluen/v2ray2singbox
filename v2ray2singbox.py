@@ -115,7 +115,8 @@ class V2raySingboxConverter:
                     "server": vmess_info.get('add', ''),
                     "server_port": int(vmess_info.get('port', 0)),
                     "uuid": vmess_info.get('id', ''),
-                    "security": vmess_info.get('scy', 'auto')
+                    "security": vmess_info.get('scy', 'auto'),
+                    "alter_id": int(vmess_info.get('aid', 0))
                 }
 
                 # 处理传输协议
@@ -450,7 +451,6 @@ class V2raySingboxConverter:
                         "server": server,
                         "server_port": int(port),
                         "uuid": uuid_str,
-                        "encryption": params_dict.get('encryption', 'none'),
                         "flow": params_dict.get('flow', '')
                     }
 
